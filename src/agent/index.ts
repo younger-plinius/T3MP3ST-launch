@@ -31,6 +31,8 @@ export interface AgentLoopOptions {
   maxTokens?: number;
   /** Tool categories to expose (default: all) */
   toolCategories?: string[];
+  /** Explicit tool-NAME allowlist — the operator's role toolkit. Overrides toolCategories. */
+  tools?: string[];
   /** Whether to include detailed tool output in context (default: true) */
   verboseToolOutput?: boolean;
   /** Max characters per tool result before truncation (default: 4000) */
@@ -91,6 +93,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       maxIterations: options?.maxIterations ?? 15,
       maxTokens: options?.maxTokens ?? 50000,
       toolCategories: options?.toolCategories ?? [],
+      tools: options?.tools ?? [],
       verboseToolOutput: options?.verboseToolOutput ?? true,
       maxToolOutputLength: options?.maxToolOutputLength ?? 4000,
     };
@@ -114,9 +117,11 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
     const seenCalls = new Map<string, string>();
     let noProgress = 0;
 
-    // Get tool definitions from Arsenal
+    // Get tool definitions from Arsenal (the operator's role toolkit: name allowlist wins,
+    // then category filter, then all).
     const toolDefs = this.arsenal.getToolDefinitions(
-      this.options.toolCategories.length > 0 ? this.options.toolCategories : undefined
+      this.options.toolCategories.length > 0 ? this.options.toolCategories : undefined,
+      this.options.tools.length > 0 ? this.options.tools : undefined
     );
 
     // Build initial messages
@@ -308,7 +313,10 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       // A bad/hallucinated tool name must NOT crash the loop. Return the callable set so the
       // model self-corrects in-place instead of dying or looping on a tool that doesn't exist.
       const available = this.arsenal
-        .getToolDefinitions(this.options.toolCategories.length ? this.options.toolCategories : undefined)
+        .getToolDefinitions(
+          this.options.toolCategories.length ? this.options.toolCategories : undefined,
+          this.options.tools.length ? this.options.tools : undefined
+        )
         .map((t) => t.name);
       toolResult = {
         success: false,

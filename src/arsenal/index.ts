@@ -82,8 +82,70 @@ export interface ToolExecution {
 // ARSENAL
 // =============================================================================
 
+// ── Egress scope gate (Phase-0 pack-hunt safety primitive) ──────────────────────────────────
+// A HARD allowlist enforced inside Arsenal.execute() BEFORE any handler runs, so an LLM-supplied
+// tool target can never reach an out-of-scope host. When no scope is set (library/test mode)
+// enforcement is off; the server/mission sets it from the authorized targets so live runs are gated.
+// This closes the "a keyless pack operator fires nuclei/nmap/sqlmap at an off-target host" hole:
+// the only prior scope check was at the HTTP boundary, keyed to the mission target — the per-tool
+// target the model actually supplies was never checked.
+export interface ArsenalScope {
+  /** exact hosts / registrable domains explicitly authorized (subdomains allowed) */
+  allowedHosts: string[];
+  /** allow 127.0.0.0/8, localhost, ::1 */
+  allowLoopback: boolean;
+  /** allow RFC-1918 / link-local / ULA lab ranges */
+  allowPrivate: boolean;
+}
+
+/** The parameter keys a networked tool reads its target from (dns/web/vuln handlers). */
+const SCOPE_TARGET_KEYS = ['url', 'target', 'host', 'hostname', 'domain', 'address', 'ip', 'endpoint', 'base_url'];
+
+/** Normalize a target-ish value to a bare lowercase host (strip scheme/user/port/path). null if not host-like. */
+export function hostFromTargetValue(v: unknown): string | null {
+  if (typeof v !== 'string' || !v.trim()) return null;
+  let s = v.trim();
+  try { if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = new URL(s).hostname; } catch { /* treat as bare host */ }
+  s = s.replace(/^[^@/]*@/, '').replace(/\/.*$/, '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+  return s.toLowerCase() || null;
+}
+
+function isLoopbackTargetHost(h: string): boolean {
+  return h === 'localhost' || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+function isPrivateTargetHost(h: string): boolean {
+  return /^10(?:\.\d{1,3}){3}$/.test(h)
+    || /^192\.168(?:\.\d{1,3}){2}$/.test(h)
+    || /^172\.(1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}$/.test(h)
+    || /^169\.254(?:\.\d{1,3}){2}$/.test(h)          // link-local
+    || /^(fc|fd)[0-9a-f]{2}:/i.test(h);              // IPv6 ULA
+}
+
+/** null = in scope (or no host to check); otherwise the out-of-scope host that must be blocked. */
+export function scopeViolation(scope: ArsenalScope | null, context: ToolContext): string | null {
+  if (!scope) return null; // enforcement off until configured
+  const candidates: string[] = [];
+  const ta = context.target?.address;
+  if (ta) { const h = hostFromTargetValue(ta); if (h) candidates.push(h); }
+  for (const k of SCOPE_TARGET_KEYS) {
+    const h = hostFromTargetValue((context.parameters || {})[k]);
+    if (h) candidates.push(h);
+  }
+  const allow = scope.allowedHosts.map(a => a.toLowerCase());
+  for (const h of candidates) {
+    const inScope =
+      (scope.allowLoopback && isLoopbackTargetHost(h)) ||
+      (scope.allowPrivate && isPrivateTargetHost(h)) ||
+      allow.some(a => a === h || h.endsWith('.' + a));
+    if (!inScope) return h; // first out-of-scope host blocks the whole call
+  }
+  return null;
+}
+
 export class Arsenal extends EventEmitter<ArsenalEvents> {
   private tools: Map<string, CustomTool> = new Map();
+  /** Authorized egress scope; null = enforcement off (set by the server/mission for live runs). */
+  private scope: ArsenalScope | null = null;
   private executions: ToolExecution[] = [];
 
   /**
@@ -124,6 +186,10 @@ export class Arsenal extends EventEmitter<ArsenalEvents> {
     return this.getAllTools().filter(t => t.category === category);
   }
 
+  /** Set (or clear with null) the authorized egress scope enforced in execute(). */
+  setScope(scope: ArsenalScope | null): void { this.scope = scope; }
+  getScope(): ArsenalScope | null { return this.scope; }
+
   /**
    * Execute a tool
    */
@@ -134,6 +200,18 @@ export class Arsenal extends EventEmitter<ArsenalEvents> {
     const tool = this.tools.get(toolName);
     if (!tool) {
       throw new Error(`Tool "${toolName}" not found`);
+    }
+
+    // Egress scope gate: deny out-of-scope network targets BEFORE the handler runs. A tool call
+    // never reaches a host outside the authorized scope, regardless of what the model supplied.
+    const blockedHost = scopeViolation(this.scope, context);
+    if (blockedHost) {
+      const denied: ToolResult = {
+        success: false,
+        error: `SCOPE DENIED: target '${blockedHost}' is not in the authorized scope — ${toolName} refused before execution. Only authorized / loopback / lab targets are permitted.`,
+      };
+      this.emit('tool:error', { tool, error: new Error(denied.error) });
+      return denied;
     }
 
     const execution: ToolExecution = {
@@ -189,9 +267,13 @@ export class Arsenal extends EventEmitter<ArsenalEvents> {
   /**
    * Convert registered tools to LLM tool definitions for function calling
    */
-  getToolDefinitions(categories?: string[]): LLMToolDefinition[] {
+  getToolDefinitions(categories?: string[], names?: string[]): LLMToolDefinition[] {
     let tools = this.getAllTools();
-    if (categories?.length) {
+    // A per-operator NAME allowlist (the archetype's role toolkit) is the precise gate and
+    // takes precedence over the coarse category filter; fall back to categories, then to all.
+    if (names?.length) {
+      tools = tools.filter(t => names.includes(t.name));
+    } else if (categories?.length) {
       tools = tools.filter(t => categories.includes(t.category));
     }
     return tools.map(tool => {

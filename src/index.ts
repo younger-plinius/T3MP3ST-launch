@@ -221,7 +221,7 @@ import { OperatorCell, OperatorAgent, ARCHETYPE_PROFILES } from './operators/ind
 import { MissionControl, TaskQueue } from './mission/index.js';
 import { TargetEnvironment } from './target/index.js';
 import { EvidenceVault } from './evidence/index.js';
-import { Arsenal, BUILTIN_TOOLS, EXTERNAL_TOOLS } from './arsenal/index.js';
+import { Arsenal, BUILTIN_TOOLS, EXTERNAL_TOOLS, hostFromTargetValue } from './arsenal/index.js';
 import { OpsecController, createBalancedOpsecConfig } from './opsec/index.js';
 import { CommsChannel } from './comms/index.js';
 import { AnalysisEngine } from './analysis/index.js';
@@ -424,11 +424,25 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     // Only mark "seeded" if a mission actually exists — otherwise generateTasksForTarget
     // no-ops and we'd falsely suppress the tick-loop seeding (leaving operators idle).
     this.targetEnv.on('target:added', (target) => {
+      this.syncArsenalScope();
       if (this.mission.getActiveMission()) {
         this.mission.generateTasksForTarget(target.address);
         this.taskSeeded = true;
       }
     });
+  }
+
+  /**
+   * Recompute the arsenal's authorized egress scope from the mission's targets. Operators can only
+   * reach the authorized target hosts (+ loopback + lab/private ranges); every other host is refused
+   * at arsenal.execute() before the handler runs. Called whenever a target is added, so a keyless
+   * operator can never point a networked tool at an off-target host.
+   */
+  private syncArsenalScope(): void {
+    const allowedHosts = this.targetEnv.getAllTargets()
+      .map((t) => hostFromTargetValue(t.address))
+      .filter((h): h is string => !!h);
+    this.arsenal.setScope({ allowedHosts, allowLoopback: true, allowPrivate: true });
   }
 
   /**
@@ -973,12 +987,14 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     const operator = this.cell.spawnOperator(callsign, archetype);
     this.setupOperatorEvents(operator);
 
-    // Attach the agent loop scoped to this archetype's tool categories
+    // Attach the agent loop scoped to this archetype's SPECIALIZED role toolkit (defaultTools =
+    // the curated per-operator tool allowlist). toolCategories stays as a coarse fallback.
     const profile = ARCHETYPE_PROFILES[archetype];
     const agentLoop = new AgentLoop(this.llm, this.arsenal, {
       maxIterations: 15,
       maxTokens: 50000,
       toolCategories: profile.toolCategories,
+      tools: profile.defaultTools,
     });
     operator.attachArsenal(this.arsenal, agentLoop);
 
