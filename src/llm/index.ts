@@ -777,6 +777,64 @@ class LocalAdapter implements LLMProviderAdapter {
 // CODEX ADAPTER (local Codex CLI/account subscription)
 // =============================================================================
 
+// ── tool-calling over a plain-text CLI agent (local-agent / codex backbones) ──
+// These CLIs return TEXT, not structured tool_calls like an API — so historically
+// the ReAct loop got no `toolCalls`, took its "final answer" branch on turn 0, and
+// abstained without ever running the Arsenal (the keyless-path bug). Fix: describe
+// the Arsenal + a strict JSON action-contract in the prompt, then parse the agent's
+// text reply back into LLMToolCall[] so `arsenal.execute` actually runs the tools.
+function renderToolContract(tools?: LLMToolDefinition[]): string {
+  if (!tools?.length) return '';
+  const lines = ['\n## ARSENAL — tools the HARNESS runs for you (you REQUEST them, it EXECUTES + returns the output):'];
+  for (const t of tools) {
+    const props = (t.parameters?.properties || {}) as Record<string, { type?: string }>;
+    const req = new Set(t.parameters?.required || []);
+    const sig = Object.entries(props).map(([k, v]) => `${k}${req.has(k) ? '*' : ''}: ${v.type || 'any'}`).join(', ');
+    lines.push(`- ${t.name}(${sig}) — ${t.description}`);
+  }
+  lines.push(
+    '',
+    '## ACTION CONTRACT — follow EXACTLY:',
+    '• To run one or more tools, reply with ONLY this fenced block, nothing else:',
+    '```json',
+    '{"tool_calls":[{"name":"<tool>","arguments":{ ... }}]}',
+    '```',
+    '  The harness runs them (scope-gated) and returns the results as new messages; then you reason again.',
+    '• When the attack surface is exhausted and you are DONE, reply with your final debrief in prose (NO json block).',
+    '• Never run these tools yourself — REQUEST them. Requesting is how you act.',
+  );
+  return lines.join('\n');
+}
+
+// Parse an LLMToolCall[] out of a text-CLI reply (fenced json block, bare object, or whole reply).
+export function parseTextToolCalls(text: string): LLMToolCall[] | undefined {
+  const build = (arr: unknown): LLMToolCall[] | undefined => {
+    if (!Array.isArray(arr) || arr.length === 0) return undefined;
+    const calls = arr
+      .filter((tc): tc is { name: string } => !!tc && typeof (tc as { name?: unknown }).name === 'string')
+      .map((tc, i) => {
+        const o = tc as { name: string; arguments?: unknown; args?: unknown; parameters?: unknown };
+        return {
+          id: `lc_${Date.now()}_${i}`,
+          name: o.name,
+          arguments: (o.arguments ?? o.args ?? o.parameters ?? {}) as Record<string, unknown>,
+        };
+      });
+    return calls.length ? calls : undefined;
+  };
+  const tryParse = (s: string): LLMToolCall[] | undefined => {
+    let obj: unknown;
+    try { obj = JSON.parse(s.trim()); } catch { return undefined; }
+    return build(Array.isArray(obj) ? obj : (obj as { tool_calls?: unknown })?.tool_calls);
+  };
+  for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)) {
+    const r = tryParse(m[1]); if (r) return r;
+  }
+  const brace = text.match(/\{[\s\S]*"tool_calls"[\s\S]*\}/);
+  if (brace) { const r = tryParse(brace[0]); if (r) return r; }
+  return tryParse(text);
+}
+
 class CodexAdapter implements LLMProviderAdapter {
   name = 'codex';
   private config: LLMConfig;
@@ -791,10 +849,17 @@ class CodexAdapter implements LLMProviderAdapter {
 
   private formatPrompt(messages: LLMMessage[], options?: ChatOptions): string {
     const parts = [
-      'You are acting as the Codex-backed planning brain for T3MP3ST.',
-      'Operate in planning, critique, and evidence-contract mode only. Do not modify files. Do not run active probes. If tools are available, use read-only inspection only.',
-      'When the caller requests JSON, return only valid JSON or the exact requested fenced JSON block.',
+      'You are acting as the Codex-backed planning brain for T3MP3ST, an authorized offensive-security harness.',
+      'Do not modify files and do not run active probes yourself.',
     ];
+    const contract = renderToolContract(options?.tools);
+    if (contract) {
+      parts.push('You drive a ReAct loop: REQUEST tools via the contract below — the HARNESS runs them scope-gated and returns results — then reason until the surface is exhausted.');
+      parts.push(contract);
+    } else {
+      parts.push('Operate in planning, critique, and evidence-contract mode only. If tools are available, use read-only inspection only.');
+      parts.push('When the caller requests JSON, return only valid JSON or the exact requested fenced JSON block.');
+    }
     if (options?.maxTokens) parts.push(`Target max output tokens: ${options.maxTokens}.`);
     for (const message of messages) {
       parts.push(`\n### ${message.role.toUpperCase()}\n${message.content}`);
@@ -867,10 +932,14 @@ class CodexAdapter implements LLMProviderAdapter {
         content = result.stdout;
       }
 
+      const trimmed = content.trim();
+      // Tool-calling over text: parse the agent's tool requests so the ReAct loop EXECUTES them.
+      const toolCalls = options?.tools?.length ? parseTextToolCalls(trimmed) : undefined;
       return {
-        content: content.trim(),
+        content: trimmed,
         model: this.config.model || 'codex-default',
-        finishReason: 'stop',
+        finishReason: toolCalls?.length ? 'tool_calls' : 'stop',
+        toolCalls,
       };
     } finally {
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
@@ -890,8 +959,14 @@ class LocalAgentAdapter implements LLMProviderAdapter {
   private formatPrompt(messages: LLMMessage[], options?: ChatOptions): string {
     const parts = [
       'You are the local-agent planning brain for T3MP3ST, an authorized offensive-security harness.',
-      'Operate in planning, analysis, and evidence-contract mode. When the caller requests JSON, return ONLY valid JSON or the exact requested fenced block — no preamble.',
     ];
+    const contract = renderToolContract(options?.tools);
+    if (contract) {
+      parts.push('You drive a ReAct loop: REQUEST tools, the harness runs them and returns results, you reason until the surface is exhausted.');
+      parts.push(contract);
+    } else {
+      parts.push('Operate in planning, analysis, and evidence-contract mode. When the caller requests JSON, return ONLY valid JSON or the exact requested fenced block — no preamble.');
+    }
     if (options?.maxTokens) parts.push(`Target max output tokens: ${options.maxTokens}.`);
     for (const m of messages) parts.push(`\n### ${m.role.toUpperCase()}\n${m.content}`);
     return parts.join('\n');
@@ -899,8 +974,16 @@ class LocalAgentAdapter implements LLMProviderAdapter {
   async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
     const agentId = this.config.model || 'codex';
     const prompt = this.formatPrompt(messages, options);
-    const content = await localAgentChat(agentId, prompt, { timeoutMs: this.config.timeout || 240000 });
-    return { content: content.trim(), model: `local-agent:${agentId}`, finishReason: 'stop' };
+    const content = (await localAgentChat(agentId, prompt, { timeoutMs: this.config.timeout || 240000 })).trim();
+    // Tool-calling over text: if the Arsenal was offered, parse the agent's tool requests so the
+    // ReAct loop EXECUTES them instead of treating this planning turn as the (abstaining) final answer.
+    const toolCalls = options?.tools?.length ? parseTextToolCalls(content) : undefined;
+    return {
+      content,
+      model: `local-agent:${agentId}`,
+      finishReason: toolCalls?.length ? 'tool_calls' : 'stop',
+      toolCalls,
+    };
   }
 }
 
