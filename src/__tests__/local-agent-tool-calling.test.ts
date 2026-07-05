@@ -134,3 +134,23 @@ describe('local-model (HTTP) backbone surfaces toolCalls — the keyless-path fi
     expect(sys.content).toContain('nmap_scan');
   });
 });
+
+describe('xai provider (Grok Build) — routes to xAI OpenAI-compatible API with the key', () => {
+  const origFetch = global.fetch;
+  afterEach(() => { global.fetch = origFetch; });
+  it('hits api.x.ai with the bearer key and surfaces native tool_calls', async () => {
+    const spy = vi.fn(async (_url: string, _init: { headers: Record<string, string> }) => ({
+      ok: true,
+      json: async () => ({
+        model: 'grok-build-0.1',
+        choices: [{ message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'nmap_scan', arguments: '{"target":"x"}' } }] }, finish_reason: 'tool_calls' }],
+      }),
+    } as unknown as Response));
+    global.fetch = spy as unknown as typeof fetch;
+    const be = new LLMBackbone({ provider: 'xai', model: 'grok-build-0.1', apiKey: 'xai-test-key-1234567890', baseUrl: 'https://api.x.ai/v1' } as never);
+    const res = await be.chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
+    expect(res.toolCalls?.[0]?.name).toBe('nmap_scan');
+    expect(spy.mock.calls[0][0]).toContain('api.x.ai');
+    expect((spy.mock.calls[0][1] as { headers: Record<string, string> }).headers.Authorization).toContain('xai-test-key');
+  });
+});

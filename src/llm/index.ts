@@ -1201,6 +1201,8 @@ export class LLMBackbone extends EventEmitter<LLMEvents> {
         return new AnthropicAdapter(config);
       case 'openai':
         return new OpenAIAdapter(config);
+      case 'xai':
+        return new OpenAIAdapter(config); // xAI (Grok Build / grok-*) is OpenAI-compatible
       case 'codex':
         return new CodexAdapter(config);
       case 'mock':

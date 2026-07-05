@@ -22,6 +22,7 @@ export interface TempestSettings {
     venice?: string;
     anthropic?: string;
     openai?: string;
+    xai?: string;
   };
 
   // Default LLM settings
@@ -50,6 +51,12 @@ export interface TempestSettings {
 
   // OpenAI specific
   openai: {
+    baseUrl: string;
+    defaultModel: string;
+  };
+
+  // xAI — Grok Build / Grok models (OpenAI-compatible API)
+  xai: {
     baseUrl: string;
     defaultModel: string;
   };
@@ -110,6 +117,11 @@ const DEFAULT_SETTINGS: TempestSettings = {
   openai: {
     baseUrl: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4-turbo-preview',
+  },
+
+  xai: {
+    baseUrl: 'https://api.x.ai/v1',
+    defaultModel: 'grok-build-0.1',
   },
 
   codex: {
@@ -389,6 +401,16 @@ export const AVAILABLE_MODELS: Record<LLMProvider, ModelInfo[]> = {
       capabilities: ['testing'],
     },
   ],
+  xai: [
+    {
+      id: 'grok-build-0.1',
+      name: 'Grok Build (grok-build-0.1, 256K)',
+      provider: 'xAI',
+      contextWindow: 256000,
+      maxOutput: 8192,
+      capabilities: ['reasoning', 'code', 'analysis', 'agents', 'tools'],
+    },
+  ],
   local: [
     {
       id: 'local-model',
@@ -495,7 +517,7 @@ class ConfigManager {
 
     for (const [provider, envKey] of Object.entries(envKeys)) {
       if (envKey && !currentKeys[provider as keyof typeof currentKeys]) {
-        this.setApiKey(provider as 'openrouter' | 'venice' | 'anthropic' | 'openai', envKey);
+        this.setApiKey(provider as 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai', envKey);
       }
     }
 
@@ -526,7 +548,7 @@ class ConfigManager {
   /**
    * Set an API key for a provider
    */
-  setApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai', key: string): void {
+  setApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai', key: string): void {
     const apiKeys = this.config.get('apiKeys');
     apiKeys[provider] = key;
     this.config.set('apiKeys', apiKeys);
@@ -535,13 +557,14 @@ class ConfigManager {
   /**
    * Get an API key for a provider
    */
-  getApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai'): string | undefined {
+  getApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai'): string | undefined {
     // First check environment variables (highest priority)
     const envVarMap = {
       openrouter: 'OPENROUTER_API_KEY',
       venice: 'VENICE_API_KEY',
       anthropic: 'ANTHROPIC_API_KEY',
       openai: 'OPENAI_API_KEY',
+      xai: 'XAI_API_KEY',
     };
 
     // Force a fully UNCONFIGURED server (no key from env OR the saved store) — used by
@@ -560,7 +583,7 @@ class ConfigManager {
   /**
    * Check if a provider has a valid API key configured
    */
-  hasApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai'): boolean {
+  hasApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai'): boolean {
     const key = this.getApiKey(provider);
     return !!key && key.length > 10;
   }
@@ -568,7 +591,7 @@ class ConfigManager {
   /**
    * Remove an API key
    */
-  removeApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai'): void {
+  removeApiKey(provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai'): void {
     const apiKeys = this.config.get('apiKeys');
     delete apiKeys[provider];
     this.config.set('apiKeys', apiKeys);
@@ -584,6 +607,7 @@ class ConfigManager {
     if (this.hasApiKey('venice')) providers.push('venice');
     if (this.hasApiKey('anthropic')) providers.push('anthropic');
     if (this.hasApiKey('openai')) providers.push('openai');
+    if (this.hasApiKey('xai')) providers.push('xai');
 
     // Codex uses the local Codex CLI/account auth instead of API-key storage.
     providers.push('codex');
@@ -624,6 +648,12 @@ class ConfigManager {
         apiKey = this.getApiKey('openai');
         baseUrl = this.config.get('openai').baseUrl;
         actualModel = model || this.config.get('openai').defaultModel;
+        break;
+      case 'xai':
+        // Grok Build / Grok — xAI's OpenAI-compatible API (native tool-calling).
+        apiKey = this.getApiKey('xai');
+        baseUrl = this.config.get('xai').baseUrl;
+        actualModel = model || this.config.get('xai').defaultModel;
         break;
       case 'codex':
         actualModel = model || this.config.get('codex').defaultModel;
@@ -670,7 +700,7 @@ class ConfigManager {
     const flag = (process.env.TEMPEST_MODEL_FALLBACK || '').trim().toLowerCase();
     if (!flag || ['0', 'false', 'off', 'no'].includes(flag)) return [];
     const chain: FallbackEntry[] = [];
-    const add = (p: 'openrouter' | 'venice' | 'anthropic' | 'openai') => {
+    const add = (p: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai') => {
       if (p === primary || !this.hasApiKey(p)) return;
       chain.push({
         provider: p,
@@ -683,6 +713,7 @@ class ConfigManager {
     add('venice');
     add('anthropic');
     add('openai');
+    add('xai');
     return chain;
   }
 
@@ -800,8 +831,8 @@ OPENAI_API_KEY=
 export const config = new ConfigManager();
 
 // Helper functions for quick access
-export const getApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai') => config.getApiKey(provider);
-export const setApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai', key: string) => config.setApiKey(provider, key);
-export const hasApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai') => config.hasApiKey(provider);
+export const getApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai') => config.getApiKey(provider);
+export const setApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai', key: string) => config.setApiKey(provider, key);
+export const hasApiKey = (provider: 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai') => config.hasApiKey(provider);
 export const getLLMConfig = (provider?: LLMProvider, model?: string) => config.getLLMConfig(provider, model);
 export const getConfiguredProviders = () => config.getConfiguredProviders();
