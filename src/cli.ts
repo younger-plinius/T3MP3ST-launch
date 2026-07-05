@@ -164,7 +164,7 @@ async function interactiveMode(): Promise<void> {
   showBanner();
 
   // Check for API keys
-  const providers = getConfiguredProviders().filter(p => p !== 'mock' && p !== 'local');
+  const providers = getConfiguredProviders().filter(p => p !== 'mock');
 
   if (providers.length === 0) {
     showBox(
@@ -527,7 +527,7 @@ async function openSettings(): Promise<void> {
       break;
 
     case 'provider':
-      const providers = getConfiguredProviders().filter(p => p !== 'mock' && p !== 'local');
+      const providers = getConfiguredProviders().filter(p => p !== 'mock');
       if (providers.length === 0) {
         showWarning('No API keys configured');
         break;

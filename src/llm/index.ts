@@ -705,6 +705,14 @@ class MockAdapter implements LLMProviderAdapter {
 // LOCAL ADAPTER (Ollama, etc.)
 // =============================================================================
 
+// Local model over HTTP — a fully self-hosted, keyless backbone. Talks to Ollama's
+// native /api/chat by default, or any OpenAI-compatible local server (LM Studio,
+// vLLM, llama.cpp, Ollama's own /v1) when TEMPEST_LOCAL_BASE_URL is a /v1 endpoint.
+// Tool-calling is done over TEXT (renderToolContract + parseTextToolCalls, defined
+// below and shared with the CLI-agent adapters): it works on ANY local model,
+// whether or not it supports native function-calling — without it a local model
+// hits the keyless-path abstain bug (no toolCalls → ReAct bails turn 0 → Arsenal
+// never runs).
 class LocalAdapter implements LLMProviderAdapter {
   name = 'local';
   private config: LLMConfig;
@@ -717,28 +725,55 @@ class LocalAdapter implements LLMProviderAdapter {
     return { valid: true };
   }
 
-  async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
-    const baseUrl = this.config.baseUrl || 'http://localhost:11434/api';
-    const url = `${baseUrl}/chat`;
+  // A /v1 base URL means an OpenAI-compatible server (/chat/completions, choices[]).
+  private isOpenAIWire(baseUrl: string): boolean {
+    return /\/v1(\/|$)/.test(baseUrl);
+  }
 
-    const requestBody = {
-      model: this.config.model,
-      messages: messages.map(m => ({
-        role: m.role,
-        content: m.content,
-      })),
-      stream: false,
-      options: {
-        num_predict: options?.maxTokens || this.config.maxTokens || 4096,
-        temperature: options?.temperature ?? this.config.temperature ?? 0.7,
-      },
-    };
+  // Inject the Arsenal contract as a system turn when tools are offered, and
+  // sanitize prior tool-request / tool-result turns — a plain local model doesn't
+  // understand role:'tool', and re-emitting a prior ```json``` block would get
+  // re-parsed as a fresh live call (defeats termination). Its TEXT reply is parsed
+  // back into tool calls after the round-trip.
+  private buildMessages(messages: LLMMessage[], options?: ChatOptions): { role: string; content: string }[] {
+    const contract = renderToolContract(options?.tools);
+    const preamble = 'You are the planning brain for T3MP3ST, an authorized offensive-security harness.'
+      + (contract
+        ? ' You drive a ReAct loop: REQUEST tools, the harness runs them and returns results, you reason until the surface is exhausted.' + contract
+        : ' Operate in planning and analysis mode; when JSON is requested, return ONLY the requested block — no preamble.');
+    const out: { role: string; content: string }[] = [{ role: 'system', content: preamble }];
+    for (const m of messages) {
+      if (m.role === 'assistant' && m.toolCalls?.length) {
+        out.push({ role: 'assistant', content: `[requested tools: ${m.toolCalls.map(t => t.name).join(', ')}]` });
+      } else if (m.role === 'tool') {
+        out.push({ role: 'user', content: `TOOL RESULT (${m.name || 'tool'}):\n${m.content}` });
+      } else {
+        out.push({ role: m.role, content: m.content });
+      }
+    }
+    return out;
+  }
+
+  async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
+    const baseUrl = (this.config.baseUrl || 'http://localhost:11434/api').replace(/\/$/, '');
+    const openaiWire = this.isOpenAIWire(baseUrl);
+    const url = `${baseUrl}/${openaiWire ? 'chat/completions' : 'chat'}`;
+    const wireMessages = this.buildMessages(messages, options);
+    const maxTokens = options?.maxTokens || this.config.maxTokens || 4096;
+    const temperature = options?.temperature ?? this.config.temperature ?? 0.7;
+
+    const requestBody = openaiWire
+      ? { model: this.config.model, messages: wireMessages, max_tokens: maxTokens, temperature, stream: false }
+      : { model: this.config.model, messages: wireMessages, stream: false, options: { num_predict: maxTokens, temperature } };
 
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          // Local OpenAI-compatible servers usually ignore auth, but LM Studio & co.
+          // expect *some* bearer — send a dummy unless the operator set a real key.
+          ...(openaiWire ? { Authorization: `Bearer ${this.config.apiKey || 'local'}` } : {}),
         },
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(this.config.timeout || 120000),
@@ -748,24 +783,35 @@ class LocalAdapter implements LLMProviderAdapter {
         throw new Error(`Local LLM error: ${response.status}`);
       }
 
-      const data = await response.json() as OllamaResponse;
+      const data = await response.json() as OllamaResponse & {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      };
+      const content = openaiWire ? (data.choices?.[0]?.message?.content || '') : (data.message?.content || '');
+
+      // Tool-calling over text: if the Arsenal was offered, parse the model's tool
+      // requests so the ReAct loop EXECUTES them instead of abstaining on turn 0.
+      const toolCalls = options?.tools?.length ? parseTextToolCalls(content) : undefined;
+
+      const usage = openaiWire
+        ? (data.usage
+            ? { promptTokens: data.usage.prompt_tokens, completionTokens: data.usage.completion_tokens, totalTokens: data.usage.total_tokens }
+            : undefined)
+        : (data.eval_count
+            ? { promptTokens: data.prompt_eval_count || 0, completionTokens: data.eval_count || 0, totalTokens: (data.prompt_eval_count || 0) + (data.eval_count || 0) }
+            : undefined);
 
       return {
-        content: data.message?.content || '',
+        content,
         model: data.model || this.config.model,
-        usage: data.eval_count
-          ? {
-              promptTokens: data.prompt_eval_count || 0,
-              completionTokens: data.eval_count || 0,
-              totalTokens: (data.prompt_eval_count || 0) + (data.eval_count || 0),
-            }
-          : undefined,
-        finishReason: 'stop',
+        usage,
+        finishReason: toolCalls?.length ? 'tool_calls' : 'stop',
+        toolCalls,
       };
     } catch (error) {
       if (error instanceof TypeError && error.message.includes('fetch')) {
         throw new Error(
-          'Could not connect to local LLM. Make sure Ollama is running (ollama serve)'
+          'Could not connect to local LLM. Start Ollama (`ollama serve`), or point TEMPEST_LOCAL_BASE_URL at your OpenAI-compatible server (LM Studio / vLLM / llama.cpp).'
         );
       }
       throw error;

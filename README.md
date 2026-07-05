@@ -22,9 +22,11 @@
 
 </div>
 
-Point T3MP3ST at an authorized target and the kill chain is yours — **recon → exploit → report**, from a web War Room or the CLI, driven by the AI coding agent you're already signed into (Claude Code, Codex, Hermes). No new API keys, no cloud, no second bill. Your agent is the brain; T3MP3ST is the war machine you bolt around it. Self-hosted storm, keyless warfare. ⚡
+**Your AI coding agent is already a hacker — T3MP3ST hands it an arsenal.**
 
-The recon engine is live and tool-backed; the exploit loop is benchmark-proven — **90.1% pass@1 on XBEN**, XBOW's own 104-challenge suite, plus hint-free CTF solves and a cold hunt on real post-cutoff CVEs. Every number recomputes from committed data (`npm run verify-claims`), and the [status table](#what-ships-today) is exact about what's live, what's scaffolding, and what's still roadmap. The full 8-operator swarm is the architecture it grows into — loud about the mission, honest about where the build is. Full receipts, caveats, and the held-out CVE breakdown are in [Benchmarks](#benchmarks) below.
+Point it at an authorized target and the kill chain runs itself: **recon → exploit → report**, from a browser War Room or the CLI, driven by the agent you're *already* signed into — Claude Code, Codex, Hermes — or a model you run **fully offline** (Ollama, LM Studio, vLLM). No new API keys, no cloud tenant, no second bill. Your agent is the brain; T3MP3ST is the war machine bolted around it. **Self-hosted storm. Keyless warfare.** ⚡
+
+And it won't ask you to take its word for it. On **XBOW's own 104-challenge suite it scores 90.1% pass@1** — above XBOW's self-reported 85% — alongside hint-free CTF solves and a **cold hunt on real, post-cutoff CVEs the model had never seen**. Every number in this README recomputes from committed data with one command (`npm run verify-claims`). Loud about the mission, honest about the build — the [status table](#what-ships-today) says exactly what's live, what's scaffolding, and what's still roadmap; full receipts in [Benchmarks](#benchmarks).
 
 Three things set it apart:
 
@@ -68,6 +70,17 @@ Prefer to bring a key? Set one and skip the connect step:
 ```bash
 export OPENROUTER_API_KEY=...     # or VENICE_API_KEY / ANTHROPIC_API_KEY
 ```
+
+Or run it **fully offline** on your own model — no key, no cloud. Defaults to Ollama; point it at any OpenAI-compatible server (LM Studio, vLLM, llama.cpp):
+
+```bash
+ollama serve && ollama pull llama3                          # or an OpenAI-compatible server
+export TEMPEST_LOCAL_BASE_URL=http://localhost:11434/api    # LM Studio: http://localhost:1234/v1
+export TEMPEST_LOCAL_MODEL=llama3
+npx tempest config                                          # → "Change default provider" → local
+```
+
+Tool-calling works on any local model (it's driven over text), so the Arsenal runs even on models without native function-calling.
 
 Check the numbers for yourself:
 

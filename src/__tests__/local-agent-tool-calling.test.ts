@@ -4,7 +4,7 @@
  * turn 0 and every operator abstains without ever running the Arsenal. These tests pin the fix AND
  * the parser-hardening from the PR #16 audit (over-match, ReDoS, drift-abstains, string args, Codex coverage).
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 
 // Mock the local-agent CLI bridge (LocalAgentAdapter) and the codex spawn/file read (CodexAdapter).
@@ -95,5 +95,42 @@ describe('codex backbone surfaces toolCalls (guards the CodexAdapter half of the
     fileRead.mockResolvedValueOnce('No exploitable surface. Final debrief.');
     const res = await codexBackbone().chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
     expect(res.toolCalls).toBeUndefined();
+  });
+});
+
+describe('local-model (HTTP) backbone surfaces toolCalls — the keyless-path fix for self-hosted models', () => {
+  const origFetch = global.fetch;
+  afterEach(() => { global.fetch = origFetch; });
+  const mockJson = (body: unknown) => {
+    const spy = vi.fn(async (_url: string, _init: { body: string }) => ({ ok: true, json: async () => body } as unknown as Response));
+    global.fetch = spy as unknown as typeof fetch;
+    return spy;
+  };
+  const localModel = (baseUrl?: string) => new LLMBackbone({ provider: 'local', model: 'llama3', baseUrl } as never);
+
+  it('Ollama wire (/api/chat): parses a tool request out of message.content', async () => {
+    mockJson({ model: 'llama3', message: { role: 'assistant', content: '```json\n{"tool_calls":[{"name":"nmap_scan","arguments":{"target":"x"}}]}\n```' } });
+    const res = await localModel('http://localhost:11434/api').chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
+    expect(res.toolCalls?.[0]?.name).toBe('nmap_scan');
+    expect(res.finishReason).toBe('tool_calls');
+  });
+  it('OpenAI-compatible wire (/v1): parses out of choices[0].message.content + hits /v1/chat/completions', async () => {
+    const spy = mockJson({ model: 'local', choices: [{ message: { content: '{"tool_calls":[{"name":"nmap_scan","arguments":{"target":"y"}}]}' } }] });
+    const res = await localModel('http://localhost:1234/v1').chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
+    expect(res.toolCalls?.[0]?.name).toBe('nmap_scan');
+    expect(spy.mock.calls[0][0] as string).toContain('/v1/chat/completions');
+  });
+  it('prose debrief → final answer, not a forever-abstain', async () => {
+    mockJson({ model: 'llama3', message: { content: 'No exploitable surface found. Final debrief.' } });
+    const res = await localModel().chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
+    expect(res.toolCalls).toBeUndefined();
+    expect(res.finishReason).toBe('stop');
+  });
+  it('describes the Arsenal to the model (so a local model knows what it can request)', async () => {
+    const spy = mockJson({ message: { content: 'ok' } });
+    await localModel().chatWithTools([{ role: 'user', content: 'scan' }], TOOLS as never);
+    const body = JSON.parse((spy.mock.calls[0][1] as { body: string }).body);
+    const sys = body.messages.find((m: { role: string }) => m.role === 'system');
+    expect(sys.content).toContain('nmap_scan');
   });
 });

@@ -392,11 +392,11 @@ export const AVAILABLE_MODELS: Record<LLMProvider, ModelInfo[]> = {
   local: [
     {
       id: 'local-model',
-      name: 'Local Model',
+      name: 'Local model (Ollama / LM Studio / vLLM — set TEMPEST_LOCAL_MODEL)',
       provider: 'Local',
       contextWindow: 32000,
       maxOutput: 4096,
-      capabilities: ['reasoning', 'code'],
+      capabilities: ['reasoning', 'code', 'tools'],
     },
   ],
   'local-agent': [
@@ -632,8 +632,13 @@ class ConfigManager {
         actualModel = 'mock-model';
         break;
       case 'local':
-        baseUrl = 'http://localhost:11434/api';
-        actualModel = model || 'llama3';
+        // Self-hosted, keyless. Defaults to Ollama; point TEMPEST_LOCAL_BASE_URL at
+        // any OpenAI-compatible server (LM Studio :1234/v1, vLLM :8000/v1, llama.cpp)
+        // and TEMPEST_LOCAL_MODEL at the model tag you're serving.
+        baseUrl = process.env.TEMPEST_LOCAL_BASE_URL?.trim() || 'http://localhost:11434/api';
+        // 'local-model' is the placeholder id from AVAILABLE_MODELS — treat it as unset so
+        // TEMPEST_LOCAL_MODEL (or the llama3 default) wins; a real tag passed in still takes priority.
+        actualModel = (model && model !== 'local-model' ? model : undefined) || process.env.TEMPEST_LOCAL_MODEL?.trim() || 'llama3';
         break;
       default:
         throw new Error(`Unknown provider: ${actualProvider}`);
